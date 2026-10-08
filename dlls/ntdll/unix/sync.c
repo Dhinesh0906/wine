@@ -5325,7 +5325,37 @@ NTSTATUS WINAPI NtWaitForAlertByThreadId( const void *address, const LARGE_INTEG
                 ret = futex_wait( futex, 0, &timespec );
             }
             else
-                ret = futex_wait( futex, 0, NULL );
+            {
+                /* MADEIRA: bound INFINITE address waits. RtlWaitOnAddress is this
+                 * function's only caller, and WaitOnAddress may wake spuriously by
+                 * contract, so every caller re-checks its value and waits again. A
+                 * periodic spurious wake therefore costs nothing for a correct
+                 * waiter, but recovers one whose wake was lost (God of War: DXMT's
+                 * worker threads parked forever on a word that had already changed,
+                 * which stalled the game's job system). madeira.cfg
+                 * alert-inf-recheck-ms (default 100; 0 = wait unbounded as before). */
+                static long long recheck_ms = -1;
+                if (recheck_ms < 0)
+                {
+                    long long v = madeira_cfg_int( "alert-inf-recheck-ms", 100 );
+                    recheck_ms = v < 0 ? 0 : v;
+                    fprintf( stderr, "[sync-census] infinite address waits re-check every %lld ms\n", recheck_ms );
+                }
+                if (recheck_ms && address)
+                {
+                    struct timespec ts;
+                    ts.tv_sec = recheck_ms / 1000;
+                    ts.tv_nsec = (recheck_ms % 1000) * 1000000;
+                    ret = futex_wait( futex, 0, &ts );
+                    if (ret == -1 && errno == ETIMEDOUT)
+                    {
+                        if (ios_wslot >= 0) ios_alert_waiters[ios_wslot].addr = NULL;
+                        return STATUS_ALERTED;   /* spurious wake: the caller re-checks */
+                    }
+                }
+                else
+                    ret = futex_wait( futex, 0, NULL );
+            }
             ios_woke = mach_absolute_time();   /* ml1122 */
             if (*(volatile LONG *)futex)
             {

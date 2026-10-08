@@ -2630,6 +2630,33 @@ static void get_performance_info( SYSTEM_PERFORMANCE_INFORMATION *info )
     }
 #endif
 
+#if defined(__APPLE__) && defined(WINE_IOS)
+    /* MADEIRA: free + inactive pages describe the whole device, not this app.
+     * What an application can still use before iOS terminates it is
+     * os_proc_available_memory(). Report that (capped at the advertised total,
+     * see SystemBasicInformation in virtual_ios.c), so a game's own memory
+     * governor sees real headroom shrinking and can shed caches in time
+     * (God of War's sm_pcdx_memglbl LowMem/Avail logic) instead of being killed. */
+    {
+        extern size_t os_proc_available_memory( void );
+        SYSTEM_BASIC_INFORMATION sbi;
+        unsigned long long avail = (unsigned long long)os_proc_available_memory();
+        unsigned long long total = totalram;
+        static LONG reports;
+
+        virtual_get_system_info( &sbi, FALSE );
+        if (sbi.MmNumberOfPhysicalPages)
+            total = (unsigned long long)sbi.MmNumberOfPhysicalPages * sbi.PageSize;
+        if (avail && avail < (1ull << 40))
+        {
+            totalram = total;
+            freeram = avail < total ? avail : total;
+        }
+        if ((InterlockedIncrement( &reports ) & 255) == 1)
+            fprintf( stderr, "[memstatus] reporting total=%llu MB avail=%llu MB (process headroom %llu MB)\n",
+                     totalram >> 20, freeram >> 20, avail >> 20 );
+    }
+#endif
     /* Titan Quest refuses to run if TotalPageFile <= TotalPhys */
     if (!totalswap) totalswap = page_size;
 
